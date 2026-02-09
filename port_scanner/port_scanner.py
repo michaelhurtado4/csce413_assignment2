@@ -122,7 +122,7 @@ def main():
 
     target = sys.argv[1]
     start_port = 1
-    end_port = 10000  # Scan first 1024 ports by default
+    end_port = 65535  # Scan first 1024 ports by default
 
     print(f"[*] Starting port scan on {target}")
     start = time.time()
