@@ -15,13 +15,12 @@ def send_knock(target: str, port: int, delay: float):
     try:
         print(f"[*] Knocking port {port} on {target}...")
         with socket.create_connection((target, port), timeout=1.0):
-            # Connection likely refused — we only need the SYN packet
-            pass
+            pass  # SYN is enough
     except (ConnectionRefusedError, TimeoutError):
-        # Expected behavior: port is closed
-        pass
+        pass  # expected
     except OSError as e:
         print(f"[!] Error knocking port {port}: {e}")
+
     time.sleep(delay)
 
 
@@ -45,34 +44,45 @@ def check_protected_port(target: str, protected_port: int):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Port knocking client in Python")
-    parser.add_argument("--target", required=True, help="Target host or IP")
+
+    parser.add_argument(
+        "--target",
+        required=True,
+        help="Target host or IP address",
+    )
+
     parser.add_argument(
         "--sequence",
-        default=",".join(str(port) for port in DEFAULT_KNOCK_SEQUENCE),
+        default=",".join(str(p) for p in DEFAULT_KNOCK_SEQUENCE),
         help="Comma-separated knock ports (default: 1234,5678,9012)",
     )
+
     parser.add_argument(
         "--protected-port",
         type=int,
         default=DEFAULT_PROTECTED_PORT,
         help=f"Protected service port (default: {DEFAULT_PROTECTED_PORT})",
     )
+
     parser.add_argument(
         "--delay",
         type=float,
         default=DEFAULT_DELAY,
         help=f"Delay between knocks in seconds (default: {DEFAULT_DELAY})",
     )
+
     parser.add_argument(
         "--check",
         action="store_true",
         help="Attempt connection to protected port after knocking",
     )
+
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
     try:
         sequence = [int(port.strip()) for port in args.sequence.split(",")]
     except ValueError:

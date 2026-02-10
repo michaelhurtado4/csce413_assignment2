@@ -1,174 +1,108 @@
 #!/usr/bin/env python3
-"""
-Python Port Knocking Server
-
-- Listens on a sequence of TCP ports
-- Tracks each client IP's progress through the sequence
-- Opens protected port via iptables for 30 seconds on correct sequence
-"""
-
-import argparse
-import logging
 import socket
-import threading
-import time
+import select
 import subprocess
+import logging
 
-DEFAULT_KNOCK_SEQUENCE = [1234, 5678, 9012]
-DEFAULT_PROTECTED_PORT = 2222
-DEFAULT_SEQUENCE_WINDOW = 10.0
-DEFAULT_OPEN_DURATION = 30  # seconds to keep protected port open
+# ========= CONFIG =========
+HOST = "0.0.0.0"
+KNOCK_SEQUENCE = [1234, 5678, 9012]
+PROTECTED_PORT = 2222
+# ==========================
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
-def setup_logging():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler()],
-    )
-
-
-def open_protected_port(ip, protected_port):
-    """Open the protected port for the given IP using iptables."""
-    logging.info(f"[+] Opening protected port {protected_port} for {ip}")
-    cmd = [
-        "iptables",
-        "-I",
-        "INPUT",
-        "-p",
-        "tcp",
-        "-s",
-        ip,
-        "--dport",
-        str(protected_port),
-        "-j",
-        "ACCEPT",
-    ]
-    subprocess.run(cmd, check=False)
+client_progress = {}
+sockets = []
 
 
-def close_protected_port(ip, protected_port):
-    """Close the protected port for the given IP using iptables."""
-    logging.info(f"[-] Closing protected port {protected_port} for {ip}")
-    cmd = [
-        "iptables",
-        "-D",
-        "INPUT",
-        "-p",
-        "tcp",
-        "-s",
-        ip,
-        "--dport",
-        str(protected_port),
-        "-j",
-        "ACCEPT",
-    ]
-    subprocess.run(cmd, check=False)
+def run_iptables(cmd):
+    subprocess.run(cmd, check=True)
 
 
-class KnockTracker:
-    """Tracks client IPs and their progress through the knock sequence."""
+def setup_firewall():
+    logging.info("Resetting iptables and blocking protected port")
 
-    def __init__(self, sequence, window):
-        self.sequence = sequence
-        self.window = window
-        self.clients = {}  # ip -> (current_index, last_knock_time)
-        self.lock = threading.Lock()
+    # Flush rules
+    run_iptables(["iptables", "-F"])
+    run_iptables(["iptables", "-X"])
 
-    def register_knock(self, ip, port):
-        with self.lock:
-            now = time.time()
-            idx, last_time = self.clients.get(ip, (0, None))
+    # Default policies
+    run_iptables(["iptables", "-P", "INPUT", "ACCEPT"])
+    run_iptables(["iptables", "-P", "FORWARD", "ACCEPT"])
+    run_iptables(["iptables", "-P", "OUTPUT", "ACCEPT"])
 
-            # If too much time has passed since last knock, reset
-            if last_time is not None and now - last_time > self.window:
-                idx = 0
-
-            # Check if this port is correct for current index
-            if port == self.sequence[idx]:
-                idx += 1
-                self.clients[ip] = (idx, now)
-                if idx == len(self.sequence):
-                    # Full sequence completed
-                    logging.info(f"[+] Correct sequence from {ip}")
-                    self.clients[ip] = (0, None)  # reset
-                    return True
-            else:
-                # Incorrect knock, reset
-                self.clients[ip] = (0, None)
-            return False
+    # Block protected port
+    run_iptables([
+        "iptables", "-A", "INPUT",
+        "-p", "tcp",
+        "--dport", str(PROTECTED_PORT),
+        "-j", "DROP"
+    ])
 
 
-def knock_listener(port, tracker, protected_port):
-    """Listen on a TCP port for knocks and update tracker."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("", port))
-    sock.listen(5)
-    logging.info(f"[*] Listening for knocks on port {port}")
+def open_protected_port():
+    logging.info(f"Opening protected port {PROTECTED_PORT}")
 
-    while True:
-        try:
-            conn, addr = sock.accept()
-            ip = addr[0]
-            conn.close()  # We don't actually need to receive data
-            if tracker.register_knock(ip, port):
-                open_protected_port(ip, protected_port)
-                # Close after DEFAULT_OPEN_DURATION seconds
-                threading.Thread(
-                    target=lambda ip=ip: (time.sleep(DEFAULT_OPEN_DURATION), close_protected_port(ip, protected_port)),
-                    daemon=True,
-                ).start()
-        except Exception as e:
-            logging.error(f"[!] Error on port {port}: {e}")
+    # Remove DROP rule
+    run_iptables([
+        "iptables", "-D", "INPUT",
+        "-p", "tcp",
+        "--dport", str(PROTECTED_PORT),
+        "-j", "DROP"
+    ])
 
-
-def listen_for_knocks(sequence, window_seconds, protected_port):
-    logging.info(f"Listening for knock sequence: {sequence}")
-    tracker = KnockTracker(sequence, window_seconds)
-
-    # Start a listener thread for each knock port
-    for port in sequence:
-        t = threading.Thread(target=knock_listener, args=(port, tracker, protected_port), daemon=True)
-        t.start()
-
-    # Keep main thread alive
-    while True:
-        time.sleep(1)
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Python Port Knocking Server")
-    parser.add_argument(
-        "--sequence",
-        default=",".join(str(port) for port in DEFAULT_KNOCK_SEQUENCE),
-        help="Comma-separated knock ports",
-    )
-    parser.add_argument(
-        "--protected-port",
-        type=int,
-        default=DEFAULT_PROTECTED_PORT,
-        help="Protected service port",
-    )
-    parser.add_argument(
-        "--window",
-        type=float,
-        default=DEFAULT_SEQUENCE_WINDOW,
-        help="Seconds allowed to complete the sequence",
-    )
-    return parser.parse_args()
+    # Add ACCEPT rule
+    run_iptables([
+        "iptables", "-I", "INPUT", "1",
+        "-p", "tcp",
+        "--dport", str(PROTECTED_PORT),
+        "-j", "ACCEPT"
+    ])
 
 
 def main():
-    args = parse_args()
-    setup_logging()
+    setup_firewall()
 
-    try:
-        sequence = [int(port) for port in args.sequence.split(",")]
-    except ValueError:
-        raise SystemExit("Invalid sequence. Use comma-separated integers.")
+    # Create listening sockets for knock ports
+    for port in KNOCK_SEQUENCE:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((HOST, port))
+        s.listen(5)
+        sockets.append(s)
+        logging.info(f"Listening on TCP port {port}")
 
-    listen_for_knocks(sequence, args.window, args.protected_port)
+    logging.info("Waiting for knock sequence...")
+
+    while True:
+        readable, _, _ = select.select(sockets, [], [])
+
+        for s in readable:
+            conn, addr = s.accept()
+            client_ip = addr[0]
+            port = s.getsockname()[1]
+            conn.close()
+
+            if client_ip not in client_progress:
+                client_progress[client_ip] = 0
+
+            expected_port = KNOCK_SEQUENCE[client_progress[client_ip]]
+
+            if port == expected_port:
+                client_progress[client_ip] += 1
+                logging.info(f"{client_ip} knocked correct port {port}")
+
+                if client_progress[client_ip] == len(KNOCK_SEQUENCE):
+                    logging.info(f"{client_ip} COMPLETED knock sequence")
+                    open_protected_port()
+                    client_progress[client_ip] = 0
+            else:
+                logging.info(f"{client_ip} wrong knock ({port}), resetting")
+                client_progress[client_ip] = 0
 
 
 if __name__ == "__main__":
